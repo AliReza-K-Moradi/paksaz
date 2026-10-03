@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, ArrowUpLeft, Check, CheckCircle2, ChevronDown, Download, FileSpreadsheet, Info, LockKeyhole, RotateCcw, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, UploadCloud, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUpLeft, ArrowUpRight, Check, CheckCircle2, ChevronDown, Download, FileSpreadsheet, Info, LockKeyhole, RotateCcw, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, UploadCloud, X } from "lucide-react";
+import { downloadName, formatBytes as localizeBytes, formatCount, formatNumber as localizeNumber, getCopy, getDirection, interpolate, type ErrorKey, type Language } from "../src/lib/i18n";
+import { useLanguage } from "../src/lib/use-language";
 import {
   analyzeFile,
   cleanFile,
@@ -30,12 +32,8 @@ type WebTool = {
 };
 type WebModelContext = { registerTool: (tool: WebTool, options: { signal: AbortSignal }) => void | Promise<void> };
 
-const formatNumber = (value: number) => value.toLocaleString("fa-IR");
 const feedbackRepository = process.env.NEXT_PUBLIC_GITHUB_REPO ?? "";
 const usesGitHubFeedback = Boolean(feedbackRepository);
-const formatBytes = (value: number) => value < 1024 * 1024
-  ? formatNumber(Math.max(1, Math.round(value / 1024))) + " کیلوبایت"
-  : (value / 1024 / 1024).toLocaleString("fa-IR", { maximumFractionDigits: 1 }) + " مگابایت";
 
 function track(event: string, detail: Record<string, string | number | boolean> = {}) {
   if (typeof window === "undefined") return;
@@ -46,24 +44,33 @@ function issueCount(analysis: Analysis, issue: IssueSummary, mode: CleanOptions[
   return issue.id === "digits" ? getDigitIssueCount(analysis, mode) : issue.count;
 }
 
-function errorMessage(error: unknown, fallback: string) {
-  return error instanceof CleanerError ? error.message : fallback;
+function errorKey(error: unknown, fallback: ErrorKey): ErrorKey {
+  return error instanceof CleanerError ? error.code : fallback;
 }
 
-function Stepper({ stage }: { stage: Stage }) {
+function Stepper({ stage, language }: { stage: Stage; language: Language }) {
   const active = stage === "analyzing" ? 1 : stage === "results" ? 2 : stage === "preview" || stage === "cleaning" ? 3 : 4;
-  const steps = ["انتخاب فایل", "بررسی", "پیش‌نمایش", "دریافت"];
-  return <ol className="stepper" aria-label="مراحل پاک‌سازی">{steps.map((label, index) => {
+  const copy = getCopy(language);
+  return <ol className="stepper" aria-label={copy.stepperLabel}>{copy.steps.map((label, index) => {
     const step = index + 1;
-    return <li key={label} className={step === active ? "active" : step < active ? "complete" : ""} aria-current={step === active ? "step" : undefined}><span>{step < active ? <Check size={16} /> : formatNumber(step)}</span><b>{label}</b></li>;
+    return <li key={index} className={step === active ? "active" : step < active ? "complete" : ""} aria-current={step === active ? "step" : undefined}><span>{step < active ? <Check size={16} /> : localizeNumber(step, language)}</span><b>{label}</b></li>;
   })}</ol>;
 }
 
 export default function Home() {
+  const [language, setLanguage] = useLanguage();
+  const copy = getCopy(language);
+  const direction = getDirection(language);
+  const formatNumber = (value: number) => localizeNumber(value, language);
+  const formatBytes = (value: number) => localizeBytes(value, language);
+  const countLabel = (value: number, unit: "row" | "cell" | "sheet" | "issue") => formatCount(value, unit, language);
+  const ForwardArrow = language === "en" ? ArrowRight : ArrowLeft;
+  const BackArrow = language === "en" ? ArrowLeft : ArrowRight;
+  const ExternalArrow = language === "en" ? ArrowUpRight : ArrowUpLeft;
   const pickerRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [stage, setStage] = useState<Stage>("upload");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<ErrorKey | null>(null);
   const [dragging, setDragging] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [options, setOptions] = useState<CleanOptions>({ ...DEFAULT_OPTIONS });
@@ -75,6 +82,13 @@ export default function Home() {
   const [feedbackText, setFeedbackText] = useState("");
   const [feedbackState, setFeedbackState] = useState<FeedbackState>("idle");
   const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+    document.documentElement.dir = direction;
+    document.title = copy.title;
+    document.querySelector('meta[name="description"]')?.setAttribute("content", copy.description);
+  }, [language, direction, copy]);
 
   useEffect(() => {
     if (stage !== "upload") contentRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -93,25 +107,25 @@ export default function Home() {
     setRating(null);
     setFeedbackText("");
     setFeedbackState("idle");
-    setError("");
+    setError(null);
   }
 
   function chooseFile(candidate?: File) {
-    setError("");
+    setError(null);
     if (!candidate) return;
     if (!/\.(xlsx|csv)$/i.test(candidate.name)) {
       reset();
-      setError("فقط فایل‌های XLSX و CSV پشتیبانی می‌شوند.");
+      setError("INVALID_TYPE");
       return;
     }
     if (candidate.size === 0) {
       reset();
-      setError("این فایل خالی است. یک فایل دیگر انتخاب کن.");
+      setError("EMPTY_FILE");
       return;
     }
     if (candidate.size > MAX_FILE_BYTES) {
       reset();
-      setError("حجم فایل باید کمتر از ۱۰ مگابایت باشد.");
+      setError("TOO_LARGE");
       return;
     }
     reset(candidate);
@@ -120,7 +134,7 @@ export default function Home() {
 
   const startAnalysis = useCallback(async (): Promise<Analysis | null> => {
     if (!file) return null;
-    setError("");
+    setError(null);
     setStage("analyzing");
     track("analysis_started", { format: file.name.toLowerCase().endsWith(".csv") ? "csv" : "xlsx" });
     try {
@@ -134,7 +148,7 @@ export default function Home() {
       setStage("results");
       return data;
     } catch (cause) {
-      setError(errorMessage(cause, "نتونستیم فایل رو بخونیم. دوباره از Excel ذخیره‌اش کن و امتحان کن."));
+      setError(errorKey(cause, "ANALYSIS_FAILED"));
       setStage("upload");
       return null;
     }
@@ -145,16 +159,16 @@ export default function Home() {
     try {
       const next = previewCleaning(analysis, options);
       setPreview(next);
-      setError("");
+      setError(null);
       setStage("preview");
     } catch (cause) {
-      setError(errorMessage(cause, "نتونستیم پیش‌نمایش تغییرها رو آماده کنیم. دوباره امتحان کن."));
+      setError(errorKey(cause, "PREVIEW_FAILED"));
     }
   }
 
   const startCleaning = useCallback(async (): Promise<CleanResult | null> => {
     if (!analysis) return null;
-    setError("");
+    setError(null);
     setStage("cleaning");
     track("clean_started", { rows: analysis.totalRows, selected_fixes: Object.entries(options).filter(([key, value]) => key !== "digitMode" && value === true).length });
     try {
@@ -165,7 +179,7 @@ export default function Home() {
       setStage("done");
       return next;
     } catch (cause) {
-      setError(errorMessage(cause, "پاک‌سازی کامل نشد. انتخاب‌هایت حفظ شده‌اند؛ دوباره امتحان کن."));
+      setError(errorKey(cause, "CLEAN_FAILED"));
       setStage("preview");
       return null;
     }
@@ -193,11 +207,11 @@ export default function Home() {
   }
 
   function githubFeedbackUrl() {
-    const title = rating === "positive" ? "بازخورد مثبت دربارهٔ پاک‌ساز" : "پیشنهاد برای بهتر شدن پاک‌ساز";
+    const title = rating === "positive" ? copy.positiveIssueTitle : copy.negativeIssueTitle;
     const body = [
-      rating === "positive" ? "پاک‌ساز به دردم خورد." : "پاک‌ساز هنوز جای بهتر شدن دارد.",
+      rating === "positive" ? copy.positiveIssueBody : copy.negativeIssueBody,
       feedbackText.trim(),
-      "این بازخورد از نسخهٔ GitHub Pages ارسال شده؛ هیچ فایل یا محتوای سلولی پیوست نشده است.",
+      copy.issueFooter,
     ].filter(Boolean).join("\n\n");
     return `https://github.com/${feedbackRepository}/issues/new?${new URLSearchParams({ title, body })}`;
   }
@@ -223,6 +237,7 @@ export default function Home() {
       annotations: { readOnlyHint: true, untrustedContentHint: false },
       execute: () => ({
         stage,
+        language,
         hasFile: Boolean(file),
         rows: analysis?.totalRows ?? null,
         sheets: analysis?.sheets.length ?? null,
@@ -300,102 +315,163 @@ export default function Home() {
       },
     });
     return () => lifecycle.abort();
-  }, [stage, file, analysis, options, preview, startAnalysis, startCleaning]);
+  }, [stage, language, file, analysis, options, preview, startAnalysis, startCleaning]);
 
   return (
-    <main id="top" className="site-shell" dir="rtl">
+    <main id="top" className="site-shell" lang={language} dir={direction}>
       <div className="ambient ambient-one" aria-hidden="true" />
       <div className="ambient ambient-two" aria-hidden="true" />
       <header className="site-header wrap">
-        <a className="brand" href="#top" onClick={() => { if (stage !== "upload") reset(); }} aria-label="پاک‌ساز، صفحه اصلی"><span className="brand-mark"><FileSpreadsheet size={21} strokeWidth={2.15} /></span><span>پاک‌ساز</span></a>
-        <nav aria-label="پیوندهای صفحه"><a href="#how-it-works">چطور کار می‌کند؟</a><a href="#privacy">حریم خصوصی</a></nav>
+        <a className="brand" href="#top" onClick={() => { if (stage !== "upload") reset(); }} aria-label={copy.homeLabel}>
+          <span className="brand-mark"><FileSpreadsheet size={21} strokeWidth={2.15} /></span><span>{copy.brand}</span>
+        </a>
+        <div className="header-actions">
+          <nav aria-label={copy.navigation}><a href="#how-it-works">{copy.howItWorks}</a><a href="#privacy">{copy.privacy}</a></nav>
+          <div className="language-switch" role="group" aria-label={copy.languageLabel} dir="ltr">
+            <button type="button" lang="fa" dir="rtl" aria-pressed={language === "fa"} onClick={() => { setLanguage("fa"); track("language_changed", { language: "fa" }); }}>فارسی</button>
+            <button type="button" lang="en" aria-pressed={language === "en"} onClick={() => { setLanguage("en"); track("language_changed", { language: "en" }); }}>English</button>
+          </div>
+        </div>
       </header>
 
       {stage === "upload" ? (
         <section className="hero wrap" aria-labelledby="hero-title">
           <div className="hero-main">
-            <div className="eyebrow"><Sparkles size={16} /> ابزار رایگانِ مرتب‌سازی فایل</div>
-            <h1 id="hero-title">فایل اکسل به‌هم‌ریخته داری؟</h1>
-            <p className="hero-lead">فایل رو بده، مشکلات رایجش رو پیدا می‌کنیم. خودت انتخاب کن چه چیزهایی اصلاح بشن، بعد فایل تمیز رو تحویل بگیر.</p>
+            <div className="eyebrow"><Sparkles size={16} /> {copy.eyebrow}</div>
+            <h1 id="hero-title">{copy.heroTitle}</h1>
+            <p className="hero-lead">{copy.heroLead}</p>
             <div className="upload-card">
-              <div className="upload-card-heading"><span className="upload-icon"><UploadCloud size={25} strokeWidth={1.85} /></span><div><h2>فایلت رو اینجا شروع کن</h2><p>Excel یا CSV، تا ۱۰ مگابایت</p></div></div>
-              <input ref={pickerRef} id="file-picker" className="visually-hidden" type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" onChange={(event) => { chooseFile(event.target.files?.[0]); event.target.value = ""; }} />
+              <div className="upload-card-heading"><span className="upload-icon"><UploadCloud size={25} strokeWidth={1.85} /></span><div><h2>{copy.uploadTitle}</h2><p>{copy.uploadHint}</p></div></div>
+              <input ref={pickerRef} id="file-picker" className="visually-hidden" type="file" aria-label={copy.chooseFile} accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" onChange={(event) => { chooseFile(event.target.files?.[0]); event.target.value = ""; }} />
               <div className={"dropzone" + (dragging ? " is-dragging" : "")} onDragEnter={(event) => { event.preventDefault(); setDragging(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { event.preventDefault(); setDragging(false); }} onDrop={(event) => { event.preventDefault(); setDragging(false); chooseFile(event.dataTransfer.files[0]); }}>
-                {file ? <div className="selected-file"><span className="selected-file-icon"><FileSpreadsheet size={23} /></span><span className="selected-file-name"><bdi dir="auto">{file.name}</bdi><small>{formatBytes(file.size)}</small></span><button className="remove-file" type="button" onClick={() => reset()} aria-label="حذف فایل انتخاب شده"><X size={19} /></button></div> : <><span className="dropzone-art"><FileSpreadsheet size={30} strokeWidth={1.5} /></span><p>فایل را اینجا رها کن</p><span>یا</span><button type="button" className="choose-button" onClick={() => pickerRef.current?.click()}>انتخاب فایل <ArrowUpLeft size={17} /></button></>}
+                {file ? <div className="selected-file">
+                  <span className="selected-file-icon"><FileSpreadsheet size={23} /></span>
+                  <span className="selected-file-name"><bdi dir="auto">{file.name}</bdi><small>{formatBytes(file.size)}</small></span>
+                  <button className="remove-file" type="button" onClick={() => reset()} aria-label={copy.removeFile}><X size={19} /></button>
+                </div> : <>
+                  <span className="dropzone-art"><FileSpreadsheet size={30} strokeWidth={1.5} /></span><p>{copy.dropFile}</p><span>{copy.or}</span>
+                  <button type="button" className="choose-button" onClick={() => pickerRef.current?.click()}>{copy.chooseFile} <ExternalArrow size={17} /></button>
+                </>}
               </div>
-              {file && <button type="button" className="change-file" onClick={() => pickerRef.current?.click()}>انتخاب فایل دیگر</button>}
-              {error && <p className="form-error" role="alert">{error}</p>}
-              <button className="primary-button" type="button" disabled={!file} onClick={startAnalysis}>بررسی فایل <ArrowLeft size={19} /></button>
-              <p className="local-note"><LockKeyhole size={15} /> فایل روی همین دستگاه بررسی می‌شود و جایی آپلود نمی‌شود.</p>
+              {file && <button type="button" className="change-file" onClick={() => pickerRef.current?.click()}>{copy.chooseAnother}</button>}
+              {error && <p className="form-error" role="alert">{copy.errors[error]}</p>}
+              <button className="primary-button" type="button" disabled={!file} onClick={startAnalysis}>{copy.analyze} <ForwardArrow size={19} /></button>
+              <p className="local-note"><LockKeyhole size={15} /> {copy.localNote}</p>
             </div>
           </div>
-          <aside className="hero-visual" aria-label="نمونه‌ای از اصلاح شماره‌ها و متن">
+          <aside className="hero-visual" aria-label={copy.sampleLabel}>
             <div className="visual-orbit orbit-one" aria-hidden="true" /><div className="visual-orbit orbit-two" aria-hidden="true" />
-            <div className="sample-card"><div className="sample-top"><span className="sample-dots"><i /><i /><i /></span><span>پیش‌نمایش یک تغییر</span><span className="sample-table-icon"><FileSpreadsheet size={18} /></span></div><div className="sample-body"><span className="sample-caption">شماره موبایل</span><div className="sample-value before" dir="ltr">+98 912 123 4567 <span>قبل</span></div><div className="sample-arrow" aria-hidden="true"><ArrowLeft size={19} /></div><div className="sample-value after" dir="ltr">09121234567 <span>بعد</span></div><div className="sample-rule" /><span className="sample-caption">حروف فارسی</span><div className="sample-text" dir="rtl"><span>شركت پارسي</span><ArrowLeft size={16} /><strong>شرکت پارسی</strong></div></div></div>
-            <div className="floating-proof"><span><Check size={17} /></span> تغییرها قبل از دانلود، دست خودته</div>
+            <div className="sample-card">
+              <div className="sample-top"><span className="sample-dots"><i /><i /><i /></span><span>{copy.sampleTitle}</span><span className="sample-table-icon"><FileSpreadsheet size={18} /></span></div>
+              <div className="sample-body">
+                <span className="sample-caption">{copy.mobileNumber}</span>
+                <div className="sample-value before" dir="ltr">+98 912 123 4567 <span>{copy.before}</span></div>
+                <div className="sample-arrow" aria-hidden="true"><ArrowLeft size={19} /></div>
+                <div className="sample-value after" dir="ltr">09121234567 <span>{copy.after}</span></div>
+                <div className="sample-rule" /><span className="sample-caption">{copy.persianLetters}</span>
+                <div className="sample-text" dir="rtl" lang="fa"><span>شركت پارسي</span><ArrowLeft size={16} /><strong>شرکت پارسی</strong></div>
+              </div>
+            </div>
+            <div className="floating-proof"><span><Check size={17} /></span> {copy.sampleProof}</div>
           </aside>
         </section>
       ) : (
         <div className="workspace wrap" ref={contentRef}>
-          <p className="visually-hidden" role="status" aria-live="polite">{stage === "analyzing" ? "بررسی فایل شروع شد." : stage === "results" ? "بررسی فایل کامل شد و موارد پیدا شده نمایش داده می‌شوند." : stage === "preview" ? "پیش‌نمایش تغییرها آماده است." : stage === "cleaning" ? "پاک‌سازی فایل در حال انجام است." : "فایل پاک‌سازی شد و آمادهٔ دانلود است."}</p>
-          <Stepper stage={stage} />
-          {stage === "analyzing" || stage === "cleaning" ? <section className="waiting-card" role="status" aria-live="polite"><div className="waiting-spinner" /><h1>{stage === "analyzing" ? "داریم فایل رو بررسی می‌کنیم…" : "داریم نسخهٔ تمیز رو آماده می‌کنیم…"}</h1><p>{stage === "analyzing" ? "بسته به اندازهٔ فایل، ممکنه چند لحظه طول بکشه." : "فقط تغییرهایی که تأیید کردی اعمال می‌شن."}</p></section> : null}
+          <p className="visually-hidden" role="status" aria-live="polite">{copy.status[stage]}</p>
+          <Stepper stage={stage} language={language} />
+          {stage === "analyzing" || stage === "cleaning" ? <section className="waiting-card" role="status" aria-live="polite">
+            <div className="waiting-spinner" /><h1>{stage === "analyzing" ? copy.analyzingTitle : copy.cleaningTitle}</h1>
+            <p>{stage === "analyzing" ? copy.analyzingHint : copy.cleaningHint}</p>
+          </section> : null}
 
           {stage === "results" && analysis && <div className="workflow">
-            <div className="workflow-heading"><div><span className="eyebrow small"><CheckCircle2 size={15} /> بررسی انجام شد</span><h1>این موارد رو در فایلت پیدا کردیم</h1><p>اصلاح‌هایی که می‌خوای رو انتخاب کن. ردیفی بدون اجازهٔ تو حذف نمی‌شه.</p></div><button className="text-button" type="button" onClick={() => reset()}><RotateCcw size={17} /> فایل دیگر</button></div>
+            <div className="workflow-heading">
+              <div><span className="eyebrow small"><CheckCircle2 size={15} /> {copy.analysisDone}</span><h1>{copy.resultsTitle}</h1><p>{copy.resultsLead}</p></div>
+              <button className="text-button" type="button" onClick={() => reset()}><RotateCcw size={17} /> {copy.anotherFile}</button>
+            </div>
             <div className="workflow-grid">
-              <aside className="file-summary"><span className="summary-icon"><FileSpreadsheet size={22} /></span><h2><bdi dir="auto">{analysis.fileName}</bdi></h2><p>{analysis.fileType.toUpperCase()} <span>•</span> {formatNumber(analysis.totalRows)} ردیف <span>•</span> {formatNumber(analysis.sheets.length)} برگه</p><div className="summary-line" /><div className="summary-stat"><strong>{formatNumber(effectiveIssues.length)}</strong><span>نوع مورد پیدا شده</span></div><div className="summary-stat"><strong>{formatNumber(selectedCount)}</strong><span>اصلاح انتخاب شده</span></div><p className="summary-privacy"><LockKeyhole size={15} /> فایل فقط روی دستگاه توست.</p></aside>
-              <section className="issues-panel" aria-label="موارد پیدا شده">
-                {analysis.warnings.map((warning, index) => <div className="warning-banner" key={index}><Info size={18} /><p>{warning}</p></div>)}
-                {displayNoIssues ? <div className="no-issues"><span><CheckCircle2 size={31} /></span><h2>فایل خیلی تمیزه!</h2><p>مشکل خاصی برای اصلاح پیدا نکردیم. می‌تونی فایل دیگه‌ای رو بررسی کنی.</p><button className="secondary-button" type="button" onClick={() => reset()}>بررسی فایل دیگر</button></div> : <>
-                  <div className="issues-heading"><h2>اصلاح‌های پیشنهادی</h2><span>{formatNumber(effectiveIssues.length)} مورد</span></div>
+              <aside className="file-summary">
+                <span className="summary-icon"><FileSpreadsheet size={22} /></span><h2><bdi dir="auto">{analysis.fileName}</bdi></h2>
+                <p>{analysis.fileType.toUpperCase()} <span>•</span> {countLabel(analysis.totalRows, "row")} <span>•</span> {countLabel(analysis.sheets.length, "sheet")}</p>
+                <div className="summary-line" />
+                <div className="summary-stat"><strong>{formatNumber(effectiveIssues.length)}</strong><span>{copy.issueTypes}</span></div>
+                <div className="summary-stat"><strong>{formatNumber(selectedCount)}</strong><span>{copy.selectedFixes}</span></div>
+                <p className="summary-privacy"><LockKeyhole size={15} /> {copy.summaryPrivacy}</p>
+              </aside>
+              <section className="issues-panel" aria-label={copy.detectedIssues}>
+                {analysis.warningCodes.map((warning) => <div className="warning-banner" key={warning}><Info size={18} /><p>{copy.warnings[warning]}</p></div>)}
+                {displayNoIssues ? <div className="no-issues">
+                  <span><CheckCircle2 size={31} /></span><h2>{copy.noIssuesTitle}</h2><p>{copy.noIssuesLead}</p>
+                  <button className="secondary-button" type="button" onClick={() => reset()}>{copy.analyzeAnother}</button>
+                </div> : <>
+                  <div className="issues-heading"><h2>{copy.suggestedFixes}</h2><span>{countLabel(effectiveIssues.length, "issue")}</span></div>
                   <div className="issues-list">{analysis.issues.map((issue) => {
                     const count = issueCount(analysis, issue, options.digitMode);
                     const examples = issue.id === "digits" ? getDigitIssueExamples(analysis, options.digitMode) : issue.examples;
                     if (!count && issue.id !== "digits") return null;
                     return <article className={"issue-card" + (options[issue.id] && count ? " checked" : "")} key={issue.id}>
-                      <label className="issue-row"><input type="checkbox" checked={options[issue.id]} onChange={(event) => updateOption(issue.id, event.target.checked)} disabled={count === 0} /><span className="fake-check"><Check size={14} /></span><span className="issue-title"><strong>{issue.label}</strong><small>{issue.description}</small></span><span className="issue-count">{formatNumber(count)} {issue.id === "emptyRows" || issue.id === "duplicateRows" || issue.id === "invalidMobileRows" ? "ردیف" : "سلول"}</span></label>
-                      {issue.destructive && <p className="destructive-note">حذف ردیف‌ها فقط با انتخاب تو انجام می‌شه.</p>}
-                      {issue.id === "digits" && <div className="digit-choice"><label htmlFor="digit-mode">جهت یکسان‌سازی</label><div className="select-wrap"><select id="digit-mode" value={options.digitMode} onChange={(event) => setOptions((current) => ({ ...current, digitMode: event.target.value as CleanOptions["digitMode"] }))}><option value="latin">به اعداد انگلیسی: ۱۲۳ ← 123</option><option value="persian">به اعداد فارسی: 123 ← ۱۲۳</option></select><ChevronDown size={17} /></div><small>شماره موبایل‌ها همیشه با رقم انگلیسی ذخیره می‌شن.</small></div>}
-                      {examples.length > 0 && count > 0 && <div className="issue-examples">{examples.slice(0, 2).map((example, index) => <div className="example-line" key={index}><span className="example-locator">{example.sheet}، ردیف {formatNumber(example.row)}</span><span className="example-values"><bdi dir="auto">{example.before || "ردیف خالی"}</bdi>{example.after && <><ArrowLeft size={16} /><bdi dir="auto">{example.after}</bdi></>}</span></div>)}</div>}
+                      <label className="issue-row">
+                        <input type="checkbox" checked={options[issue.id]} onChange={(event) => updateOption(issue.id, event.target.checked)} disabled={count === 0} />
+                        <span className="fake-check"><Check size={14} /></span>
+                        <span className="issue-title"><strong>{copy.issues[issue.id].label}</strong><small>{copy.issues[issue.id].description}</small></span>
+                        <span className="issue-count">{countLabel(count, issue.destructive ? "row" : "cell")}</span>
+                      </label>
+                      {issue.destructive && <p className="destructive-note">{copy.destructiveNote}</p>}
+                      {issue.id === "digits" && <div className="digit-choice">
+                        <label htmlFor="digit-mode">{copy.digitDirection}</label>
+                        <div className="select-wrap"><select id="digit-mode" value={options.digitMode} onChange={(event) => setOptions((current) => ({ ...current, digitMode: event.target.value as CleanOptions["digitMode"] }))}>
+                          <option value="latin">{copy.latinDigits}</option><option value="persian">{copy.persianDigits}</option>
+                        </select><ChevronDown size={17} /></div><small>{copy.mobileDigitsNote}</small>
+                      </div>}
+                      {examples.length > 0 && count > 0 && <div className="issue-examples">{examples.slice(0, 2).map((example, index) => <div className="example-line" key={index}>
+                        <span className="example-locator"><bdi dir="auto">{example.sheet}</bdi> · {copy.row} {formatNumber(example.row)}</span>
+                        <span className="example-values"><bdi dir="auto">{issue.id === "emptyRows" || !example.before ? copy.emptyRow : example.before}</bdi>{example.after && <><ForwardArrow size={16} /><bdi dir="auto">{example.after}</bdi></>}</span>
+                      </div>)}</div>}
                     </article>;
                   })}</div>
-                  {error && <p className="form-error" role="alert">{error}</p>}
-                  <div className="workflow-actions"><button className="primary-button" type="button" disabled={selectedCount === 0} onClick={makePreview}>دیدن پیش‌نمایش تغییرها <ArrowLeft size={18} /></button>{selectedCount === 0 && <p>برای ادامه، دست‌کم یک اصلاح را انتخاب کن.</p>}</div>
+                  {error && <p className="form-error" role="alert">{copy.errors[error]}</p>}
+                  <div className="workflow-actions"><button className="primary-button" type="button" disabled={selectedCount === 0} onClick={makePreview}>{copy.showPreview} <ForwardArrow size={18} /></button>{selectedCount === 0 && <p>{copy.selectOneFix}</p>}</div>
                 </>}
               </section>
             </div>
           </div>}
 
           {stage === "preview" && analysis && preview && <div className="workflow">
-            <div className="workflow-heading"><div><span className="eyebrow small"><Sparkles size={15} /> قبل از پاک‌سازی</span><h1>مرور آخرِ تغییرها</h1><p>این خلاصه دقیقاً بر اساس انتخاب‌های توست. اگر خواستی، برگرد و اصلاح‌ها رو عوض کن.</p></div><button className="text-button" type="button" onClick={() => setStage("results")}><ArrowRight size={17} /> ویرایش انتخاب‌ها</button></div>
-            <div className="preview-stats"><div><strong>{formatNumber(preview.changedCells)}</strong><span>سلول تغییر می‌کند</span></div><div><strong>{formatNumber(preview.removedRows)}</strong><span>ردیف حذف می‌شود</span></div><div><strong>{formatNumber(preview.remainingRows)}</strong><span>ردیف باقی می‌ماند</span></div></div>
-            {preview.removedRows > 0 && <div className="warning-banner prominent"><Info size={19} /><p>با تأیید تو، {formatNumber(preview.removalBreakdown.emptyRows)} ردیف خالی، {formatNumber(preview.removalBreakdown.duplicateRows)} ردیف تکراری و {formatNumber(preview.removalBreakdown.invalidMobileRows)} ردیف با شماره نامعتبر حذف می‌شود.</p></div>}
-            <section className="preview-panel"><div className="panel-heading"><h2>چند نمونه از تغییرها</h2><span>قبل ← بعد</span></div>{preview.changes.length ? <div className="change-list">{preview.changes.map((change, index) => <div className="change-row" key={index}><span className="change-location">{change.sheet} · ردیف {formatNumber(change.row)}</span><div><bdi dir="auto">{change.before}</bdi><ArrowLeft size={17} /><bdi dir="auto">{change.after}</bdi></div></div>)}</div> : <p className="empty-preview">تغییر سلولی انتخاب نشده؛ فقط ردیف‌های مشخص‌شده حذف می‌شن.</p>}{preview.removedSamples.length > 0 && <p className="removed-preview">نمونهٔ ردیف‌های حذف‌شونده: {preview.removedSamples.slice(0, 2).map((row) => row.sheet + "، ردیف " + formatNumber(row.row)).join(" • ")}</p>}</section>
-            {error && <p className="form-error" role="alert">{error}</p>}
-            <div className="preview-actions"><button className="primary-button" type="button" onClick={startCleaning}>پاک‌سازی فایل <ArrowLeft size={18} /></button><button className="secondary-button" type="button" onClick={() => setStage("results")}>بازگشت به انتخاب‌ها</button></div>
+            <div className="workflow-heading"><div><span className="eyebrow small"><Sparkles size={15} /> {copy.beforeCleaning}</span><h1>{copy.previewTitle}</h1><p>{copy.previewLead}</p></div><button className="text-button" type="button" onClick={() => setStage("results")}><BackArrow size={17} /> {copy.editChoices}</button></div>
+            <div className="preview-stats"><div><strong>{formatNumber(preview.changedCells)}</strong><span>{copy.cellsToChange}</span></div><div><strong>{formatNumber(preview.removedRows)}</strong><span>{copy.rowsToRemove}</span></div><div><strong>{formatNumber(preview.remainingRows)}</strong><span>{copy.rowsRemaining}</span></div></div>
+            {preview.removedRows > 0 && <div className="warning-banner prominent"><Info size={19} /><p>{interpolate(copy.removalSummary, { empty: formatNumber(preview.removalBreakdown.emptyRows), duplicate: formatNumber(preview.removalBreakdown.duplicateRows), invalid: formatNumber(preview.removalBreakdown.invalidMobileRows) })}</p></div>}
+            <section className="preview-panel">
+              <div className="panel-heading"><h2>{copy.changeExamples}</h2><span>{copy.comparison}</span></div>
+              {preview.changes.length ? <div className="change-list">{preview.changes.map((change, index) => <div className="change-row" key={index}><span className="change-location"><bdi dir="auto">{change.sheet}</bdi> · {copy.row} {formatNumber(change.row)}</span><div><bdi dir="auto">{change.before}</bdi><ForwardArrow size={17} /><bdi dir="auto">{change.after}</bdi></div></div>)}</div> : <p className="empty-preview">{copy.emptyPreview}</p>}
+              {preview.removedSamples.length > 0 && <p className="removed-preview">{copy.removedExamples} {preview.removedSamples.slice(0, 2).map((row, index) => <span key={index}>{index > 0 && " • "}<bdi dir="auto">{row.sheet}</bdi> · {copy.row} {formatNumber(row.row)}</span>)}</p>}
+            </section>
+            {error && <p className="form-error" role="alert">{copy.errors[error]}</p>}
+            <div className="preview-actions"><button className="primary-button" type="button" onClick={startCleaning}>{copy.clean} <ForwardArrow size={18} /></button><button className="secondary-button" type="button" onClick={() => setStage("results")}>{copy.backToChoices}</button></div>
           </div>}
 
-          {stage === "done" && result && <div className="done-layout"><div className="done-icon"><Check size={35} /></div><span className="eyebrow small">فایل آماده‌ست</span><h1>فایلت مرتب شد!</h1><p>تغییرهایی که انتخاب کردی اعمال شدن. نسخهٔ تمیز آمادهٔ دریافت است.</p><div className="download-card"><span className="selected-file-icon"><FileSpreadsheet size={24} /></span><span><bdi dir="auto">{result.fileName}</bdi><small>{formatBytes(result.blob.size)} · {formatNumber(result.preview.changedCells)} سلول اصلاح‌شده · {formatNumber(result.preview.removedRows)} ردیف حذف‌شده</small></span></div><a className="primary-button download-button" href={downloadUrl} download={result.fileName} onClick={() => { setDownloaded(true); track("file_downloaded", { format: result.fileName.toLowerCase().endsWith(".csv") ? "csv" : "xlsx" }); }}><Download size={19} /> دانلود فایل تمیز</a><button className="text-button start-over" type="button" onClick={() => reset()}><RotateCcw size={17} /> بررسی یک فایل دیگر</button>
+          {stage === "done" && result && <div className="done-layout">
+            <div className="done-icon"><Check size={35} /></div><span className="eyebrow small">{copy.fileReady}</span><h1>{copy.doneTitle}</h1><p>{copy.doneLead}</p>
+            <div className="download-card"><span className="selected-file-icon"><FileSpreadsheet size={24} /></span><span><bdi dir="auto">{downloadName(result.fileName, language)}</bdi><small>{formatBytes(result.blob.size)} · {interpolate(copy.downloadSummary, { cells: formatNumber(result.preview.changedCells), rows: formatNumber(result.preview.removedRows) })}</small></span></div>
+            <a className="primary-button download-button" href={downloadUrl} download={downloadName(result.fileName, language)} onClick={() => { setDownloaded(true); track("file_downloaded", { format: result.fileName.toLowerCase().endsWith(".csv") ? "csv" : "xlsx" }); }}><Download size={19} /> {copy.download}</a>
+            <button className="text-button start-over" type="button" onClick={() => reset()}><RotateCcw size={17} /> {copy.startOver}</button>
             {downloaded && <section className="feedback-card" aria-labelledby="feedback-title">
-              <h2 id="feedback-title">پاک‌ساز به دردت خورد؟</h2>
-              <p>نظرت کمک می‌کنه نسخهٔ بعدی بهتر بشه.</p>
-              {feedbackState === "sent" ? <div className="feedback-thanks" role="status"><CheckCircle2 size={20} /> ممنون! بازخوردت ثبت شد.</div> : <>
+              <h2 id="feedback-title">{copy.feedbackTitle}</h2><p>{copy.feedbackLead}</p>
+              {feedbackState === "sent" ? <div className="feedback-thanks" role="status"><CheckCircle2 size={20} /> {copy.feedbackThanks}</div> : <>
                 <div className="rating-actions">
-                  <button className={rating === "positive" ? "selected" : ""} type="button" aria-pressed={rating === "positive"} onClick={() => { setRating("positive"); setFeedbackState("idle"); }}><ThumbsUp size={18} /> آره</button>
-                  <button className={rating === "negative" ? "selected" : ""} type="button" aria-pressed={rating === "negative"} onClick={() => { setRating("negative"); setFeedbackState("idle"); }}><ThumbsDown size={18} /> نه، هنوز جا داره</button>
+                  <button className={rating === "positive" ? "selected" : ""} type="button" aria-pressed={rating === "positive"} onClick={() => { setRating("positive"); setFeedbackState("idle"); }}><ThumbsUp size={18} /> {copy.positive}</button>
+                  <button className={rating === "negative" ? "selected" : ""} type="button" aria-pressed={rating === "negative"} onClick={() => { setRating("negative"); setFeedbackState("idle"); }}><ThumbsDown size={18} /> {copy.negative}</button>
                 </div>
                 {rating && <div className="feedback-form">
-                  <label htmlFor="feedback-note">چه چیزی کم بود؟ <span>اختیاری</span></label>
-                  <textarea id="feedback-note" maxLength={600} value={feedbackText} onChange={(event) => setFeedbackText(event.target.value)} placeholder="مثلاً اصلاح تاریخ‌ها یا کد ملی…" rows={3} />
+                  <label htmlFor="feedback-note">{copy.missingFeature} <span>{copy.optional}</span></label>
+                  <textarea id="feedback-note" dir="auto" maxLength={600} value={feedbackText} onChange={(event) => setFeedbackText(event.target.value)} placeholder={copy.feedbackPlaceholder} rows={3} />
                   {usesGitHubFeedback ? <>
-                    <small>بازخورد در GitHub عمومی می‌شه و حساب GitHub لازم داره. اطلاعات شخصی ننویس؛ فایلت پیوست نمی‌شه.</small>
-                    <a className="secondary-button" href={githubFeedbackUrl()} target="_blank" rel="noopener noreferrer" onClick={() => track(rating === "positive" ? "feedback_positive" : "feedback_negative", { has_note: Boolean(feedbackText.trim()), destination: "github_issue" })}>ادامه در GitHub <ArrowUpLeft size={16} aria-hidden="true" /></a>
-                    <small>فرم بازخورد در یک زبانهٔ تازه باز می‌شه؛ برای ثبت نهایی، دکمهٔ Create رو در GitHub بزن.</small>
+                    <small>{copy.githubPrivacy}</small>
+                    <a className="secondary-button" href={githubFeedbackUrl()} target="_blank" rel="noopener noreferrer" onClick={() => track(rating === "positive" ? "feedback_positive" : "feedback_negative", { has_note: Boolean(feedbackText.trim()), destination: "github_issue" })}>{copy.continueGithub} <ExternalArrow size={16} aria-hidden="true" /></a>
+                    <small>{copy.githubHint}</small>
                   </> : <>
-                    <small>فقط همین پیام فرستاده می‌شه؛ محتوای فایل نه.</small>
-                    <button type="button" className="secondary-button" disabled={feedbackState === "sending"} onClick={sendFeedback}>{feedbackState === "sending" ? "در حال ثبت…" : "ثبت بازخورد"}</button>
-                    {feedbackState === "error" && <p className="form-error" role="alert">بازخورد ثبت نشد. اتصال رو بررسی کن و دوباره بزن.</p>}
+                    <small>{copy.feedbackPrivacy}</small>
+                    <button type="button" className="secondary-button" disabled={feedbackState === "sending"} onClick={sendFeedback}>{feedbackState === "sending" ? copy.sendingFeedback : copy.submitFeedback}</button>
+                    {feedbackState === "error" && <p className="form-error" role="alert">{copy.feedbackError}</p>}
                   </>}
                 </div>}
               </>}
@@ -404,9 +480,12 @@ export default function Home() {
         </div>
       )}
 
-      <section id="how-it-works" className="info-section wrap"><div className="section-heading"><span>یک کار ساده، در سه قدم</span><h2>فایل‌هات رو با خیال راحت مرتب کن</h2></div><div className="info-grid"><article><span className="step-number">۰۱</span><h3>فایل را انتخاب کن</h3><p>فایل Excel یا CSV را بده تا ایرادهای رایجش پیدا شود.</p></article><article><span className="step-number">۰۲</span><h3>تغییرها را بررسی کن</h3><p>ببین چه چیزهایی پیدا شده و فقط اصلاح‌های دلخواهت را روشن بگذار.</p></article><article><span className="step-number">۰۳</span><h3>نسخهٔ تمیز را بگیر</h3><p>خلاصهٔ تغییرها را ببین و فایل مرتب‌شده را دانلود کن.</p></article></div></section>
-      <section id="privacy" className="privacy-strip wrap"><div className="privacy-icon"><ShieldCheck size={26} /></div><div><h2>فایلت برای خودت می‌ماند</h2><p>پردازش در مرورگر خودت انجام می‌شود. محتوای فایل به سرور فرستاده یا ذخیره نمی‌شود.</p></div></section>
-      <footer className="site-footer wrap"><span>پاک‌ساز <span className="footer-dot">•</span> ابزاری ساده برای فایل‌های مرتب‌تر</span><a href="#top">بازگشت به بالا ↑</a></footer>
+      <section id="how-it-works" className="info-section wrap">
+        <div className="section-heading"><span>{copy.infoEyebrow}</span><h2>{copy.infoTitle}</h2></div>
+        <div className="info-grid">{copy.infoSteps.map((step, index) => <article key={index}><span className="step-number">{localizeNumber(index + 1, language, { minimumIntegerDigits: 2 })}</span><h3>{step.title}</h3><p>{step.body}</p></article>)}</div>
+      </section>
+      <section id="privacy" className="privacy-strip wrap"><div className="privacy-icon"><ShieldCheck size={26} /></div><div><h2>{copy.privacyTitle}</h2><p>{copy.privacyBody}</p></div></section>
+      <footer className="site-footer wrap"><span>{copy.brand} <span className="footer-dot">•</span> {copy.footer}</span><a href="#top">{copy.backToTop}</a></footer>
     </main>
   );
 }

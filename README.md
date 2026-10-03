@@ -4,6 +4,14 @@
 
 [باز کردن پاک‌ساز](https://alireza-k-moradi.github.io/paksaz/) · [مخزن GitHub](https://github.com/AliReza-K-Moradi/paksaz)
 
+## فارسی و English
+
+تمام مسیر پاک‌سازی به فارسی و انگلیسی در دسترس است. کلید زبان در بالای هر صفحه دیده می‌شود؛ تغییر زبان، فایل انتخاب‌شده و تنظیمات پاک‌سازی را حفظ می‌کند. فارسی راست‌به‌چپ و انگلیسی چپ‌به‌راست نمایش داده می‌شود. انتخاب زبان فقط روی دستگاه ذخیره می‌شود و با `?lang=fa` یا `?lang=en` می‌توان پیوند مستقیم هر زبان را به اشتراک گذاشت.
+
+[English version](https://alireza-k-moradi.github.io/paksaz/?lang=en) · [نسخهٔ فارسی](https://alireza-k-moradi.github.io/paksaz/?lang=fa)
+
+Copy lives in `src/lib/i18n.ts`. The language switch changes the interface, number formatting and download suffix; it does not translate spreadsheet contents or change the selected digit normalization rule.
+
 ## GitHub Pages
 
 نسخهٔ عمومی روی GitHub Pages یک برنامهٔ کاملاً ایستا است. برای اجرا و ساخت همین نسخه:

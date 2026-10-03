@@ -91,6 +91,7 @@ export interface Analysis {
   digitCounts: { latin: number; persian: number };
   digitExamples: { latin: IssueExample[]; persian: IssueExample[] };
   warnings: string[];
+  warningCodes: ("LEGACY_ENCODING" | "XLSX_FORMATTING" | "HIDDEN_SHEETS")[];
   /** Internal snapshot used by previewCleaning and cleanFile. */
   source: ParsedWorkbook;
 }
@@ -581,19 +582,25 @@ export async function analyzeFile(file: File): Promise<Analysis> {
   }
 
   const warnings: string[] = [];
+  const warningCodes: Analysis["warningCodes"] = [];
   const buffer = await file.arrayBuffer();
   let sheets: ParsedSheet[];
   let delimiter = ",";
   if (extension === "csv") {
     const decoded = decodeCsv(buffer);
-    if (decoded.warning) warnings.push(decoded.warning);
+    if (decoded.warning) {
+      warnings.push(decoded.warning);
+      warningCodes.push("LEGACY_ENCODING");
+    }
     delimiter = detectDelimiter(decoded.text);
     sheets = [makeSheet(file.name.replace(/\.csv$/i, ""), parseCsv(decoded.text, delimiter))];
   } else {
     sheets = readXlsx(buffer);
     warnings.push("در خروجی اکسل، قالب‌بندی دیداری و تنظیمات پیشرفته ممکن است حفظ نشوند.");
+    warningCodes.push("XLSX_FORMATTING");
     if (sheets.some((sheet) => sheet.hidden)) {
       warnings.push("برگه‌های پنهان این فایل هم بررسی و پاک‌سازی می‌شوند و در خروجی پنهان می‌مانند.");
+      warningCodes.push("HIDDEN_SHEETS");
     }
   }
   checkCapacity(sheets);
@@ -616,6 +623,7 @@ export async function analyzeFile(file: File): Promise<Analysis> {
     digitCounts,
     digitExamples,
     warnings,
+    warningCodes,
     source: { sheets, delimiter },
   };
 }
